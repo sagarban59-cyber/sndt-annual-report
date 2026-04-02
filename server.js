@@ -22,7 +22,7 @@ app.use(express.static(path.join(__dirname)));
 
 // ─── MongoDB Atlas Connection ────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI ||
-  'mongodb+srv://Annual_Report:Annual123@cluster0.6maz1te.mongodb.net/sndt_annual_reports';
+  'mongodb+srv://sagar:sagar85200@cluster0.30jwu0e.mongodb.net/?appName=Cluster0;
 
 mongoose.connect(MONGO_URI, {
   serverSelectionTimeoutMS: 15000,
