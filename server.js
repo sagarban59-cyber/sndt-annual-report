@@ -22,7 +22,7 @@ app.use(express.static(path.join(__dirname)));
 
 // ─── MongoDB Atlas Connection ────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI ||
-  'mongodb+srv://sagar:sagar85200@cluster0.30jwu0e.mongodb.net/?appName=Cluster0;
+  'mongodb+srv://sagar:sagar85200@cluster0.30jwu0e.mongodb.net/sndtdb?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI, {
   serverSelectionTimeoutMS: 15000,
