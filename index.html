@@ -1093,13 +1093,11 @@
                 <span class="section-badge" id="section-badge">Basic Department Details</span>
             </div>
             <div class="topbar-right">
-                <a class="btn btn-outline" href="dashboard.html"><i class="fas fa-home"></i> Dashboard</a>
-                <button class="btn btn-outline" onclick="openSavedPanel()"><i class="fas fa-folder-open"></i> Saved
-                    Reports</button>
+                <span id="userBadge" style="font-size:0.78rem;color:var(--muted);margin-right:6px;"></span>
                 <button class="btn btn-outline" onclick="window.print()"><i class="fas fa-print"></i> Print</button>
-                <button class="btn btn-primary" onclick="saveData()"><i class="fas fa-save"></i> Save Report</button>
-                <button class="btn btn-amber" onclick="openSubmitModal()"><i class="fas fa-paper-plane"></i>
-                    Submit</button>
+                <button class="btn btn-primary" onclick="saveToMongo()"><i class="fas fa-save"></i> Save Report</button>
+                <button class="btn btn-amber" onclick="openSubmitModal()"><i class="fas fa-paper-plane"></i> Submit</button>
+                <button class="btn btn-outline" onclick="doLogout()" style="margin-left:4px;"><i class="fas fa-sign-out-alt"></i> Logout</button>
             </div>
         </div>
 
@@ -2945,38 +2943,48 @@
         <div class="modal-box">
             <div class="modal-icon"><i class="fas fa-paper-plane"></i></div>
             <h2>Submit Annual Report</h2>
-            <p>Academic Year: <strong id="modalYear">2024–25</strong><br>Choose how you would like to save or submit
-                this Annual Report.</p>
+            <p>Academic Year: <strong id="modalYear">2024–25</strong><br>Your report will be saved to MongoDB Atlas and a PDF will be downloaded.</p>
             <div class="modal-actions">
-                <button class="btn btn-primary" onclick="exportPDF()"><i class="fas fa-file-pdf"></i> Download
-                    PDF</button>
-                <button class="btn btn-success" onclick="exportAndSave()"><i class="fas fa-save"></i> Save &amp;
-                    Download PDF</button>
-                <button class="btn btn-outline" onclick="exportJSON()"><i class="fas fa-database"></i> Save
-                    JSON</button>
-                <button class="btn btn-outline" onclick="closeSubmitModal()"><i class="fas fa-times"></i>
-                    Cancel</button>
+                <button class="btn btn-success" onclick="exportAndSave()"><i class="fas fa-save"></i> Save to Database &amp; Download PDF</button>
+                <button class="btn btn-primary" onclick="exportPDF()"><i class="fas fa-file-pdf"></i> Download PDF Only</button>
+                <button class="btn btn-outline" onclick="closeSubmitModal()"><i class="fas fa-times"></i> Cancel</button>
             </div>
         </div>
     </div>
-
-    <!-- ═══════════ SAVED REPORTS PANEL ═══════════ -->
-    <div id="savedPanel">
-        <div class="saved-box">
-            <h2><i class="fas fa-folder-open"></i> Saved Annual Reports</h2>
-            <p class="sub">All reports saved year-wise. Click Download to get the PDF for any year.</p>
-            <div id="savedReportsList"></div>
-            <div style="text-align:right;margin-top:16px;">
-                <button class="btn btn-outline" onclick="closeSavedPanel()"><i class="fas fa-times"></i> Close</button>
-            </div>
-        </div>
-    </div>
+    <!-- ═══════════ SAVED REPORTS PANEL (legacy - hidden) ═══════════ -->
+    <div id="savedPanel" style="display:none"></div>
 
     <!-- TOAST -->
     <div id="toast"><i class="fas fa-check-circle"></i> <span id="toast-msg">Saved</span></div>
 
     <!-- ═══════════ SCRIPTS ═══════════ -->
     <script>
+        /* ══════════════════════════════════════════════════════
+           CONFIG & AUTH
+        ══════════════════════════════════════════════════════ */
+        const BASE_URL = "https://sndt-annual-report-2.onrender.com";
+        const API = BASE_URL + "/api";
+
+        const token    = localStorage.getItem('sndt_token');
+        const role     = localStorage.getItem('sndt_role');
+        const username = localStorage.getItem('sndt_username');
+        const deptName = localStorage.getItem('sndt_deptName') || '';
+
+        // Redirect to login if not authenticated
+        if (!token) { window.location.href = 'login.html'; }
+
+        function authHeaders() {
+            return { 'Content-Type': 'application/json', 'x-auth-token': token };
+        }
+
+        function doLogout() {
+            localStorage.removeItem('sndt_token');
+            localStorage.removeItem('sndt_role');
+            localStorage.removeItem('sndt_username');
+            localStorage.removeItem('sndt_deptName');
+            window.location.href = 'login.html';
+        }
+
         /* ── YEAR ── */
         function updateYear(val) {
             const display = val.trim().replace('-', '–');
@@ -3135,99 +3143,419 @@
         }
 
         /* ── SAVE ── */
-        function saveData() { showToast('Report saved successfully'); }
+        function saveData() { saveToMongo(); }
 
         /* ── TOAST ── */
-        function showToast(msg) {
-            const t = document.getElementById('toast'); document.getElementById('toast-msg').textContent = msg;
-            t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000);
+        function showToast(msg, type) {
+            const t = document.getElementById('toast');
+            document.getElementById('toast-msg').textContent = msg;
+            t.style.background = type === 'error' ? '#e85a5a' : '';
+            t.classList.add('show'); setTimeout(() => { t.classList.remove('show'); t.style.background = ''; }, 3500);
         }
 
         /* ── MODAL ── */
         function openSubmitModal() { document.getElementById('submitModal').classList.add('open'); }
         function closeSubmitModal() { document.getElementById('submitModal').classList.remove('open'); }
 
-        /* ── SAVED PANEL ── */
-        function openSavedPanel() { renderSavedReports(); document.getElementById('savedPanel').classList.add('open'); }
-        function closeSavedPanel() { document.getElementById('savedPanel').classList.remove('open'); }
-
-        function getSavedReports() {
-            try { return JSON.parse(localStorage.getItem('sndtReports') || '[]'); } catch (e) { return []; }
+        /* ══════════════════════════════════════════════════════
+           COLLECT STRUCTURED DATA — matches server schema exactly
+        ══════════════════════════════════════════════════════ */
+        function getTableRows(tableId, keys) {
+            const table = document.getElementById(tableId);
+            if (!table) return [];
+            const rows = [];
+            table.querySelectorAll('tbody tr').forEach(tr => {
+                const cells = tr.querySelectorAll('td');
+                const obj = {};
+                keys.forEach((k, i) => {
+                    const cell = cells[i];
+                    if (!cell) return;
+                    const el = cell.querySelector('input,select,textarea');
+                    obj[k] = el ? el.value.trim() : cell.textContent.trim();
+                });
+                // Only include rows with at least one non-empty value
+                if (Object.values(obj).some(v => v !== '' && v !== '0')) rows.push(obj);
+            });
+            return rows;
         }
 
-        function renderSavedReports() {
-            const reports = getSavedReports();
-            const list = document.getElementById('savedReportsList');
-            if (!reports.length) {
-                list.innerHTML = `<div class="no-reports"><i class="fas fa-folder-open" style="font-size:2rem;margin-bottom:10px;display:block;color:var(--border)"></i>No saved reports yet.<br>Submit a report to save it here.</div>`;
-                return;
+        function getCloneTableRows(tbodyId, keys) {
+            const tbody = document.getElementById(tbodyId);
+            if (!tbody) return [];
+            const rows = [];
+            tbody.querySelectorAll('tr').forEach(tr => {
+                const cells = tr.querySelectorAll('td');
+                const obj = {};
+                keys.forEach((k, i) => {
+                    const cell = cells[i];
+                    if (!cell) return;
+                    const el = cell.querySelector('input,select,textarea');
+                    obj[k] = el ? el.value.trim() : cell.textContent.trim();
+                });
+                if (Object.values(obj).some(v => v !== '' && v !== '0')) rows.push(obj);
+            });
+            return rows;
+        }
+
+        function getInputVal(placeholder) {
+            const el = document.querySelector(`input[placeholder="${placeholder}"]`);
+            return el ? el.value.trim() : '';
+        }
+
+        function getTextareaVal(placeholder) {
+            const el = document.querySelector(`textarea[placeholder="${placeholder}"]`);
+            return el ? el.value.trim() : '';
+        }
+
+        // Collect base64 images from a preview container
+        function getPreviewImages(previewId) {
+            const container = document.getElementById(previewId);
+            if (!container) return [];
+            const imgs = [];
+            container.querySelectorAll('img').forEach(img => { if (img.src && img.src.startsWith('data:')) imgs.push(img.src); });
+            return imgs;
+        }
+
+        function collectStructuredData() {
+            // ── SECTION 1 ──
+            const s1inputs = document.querySelector('#section1').querySelectorAll('input:not([type="file"]):not(#academicYear), textarea');
+            const s1vals = Array.from(s1inputs).map(e => e.value.trim());
+            const section1 = {
+                departmentName:      s1vals[0] || '',
+                address:             s1vals[1] || '',
+                yearOfEstablishment: s1vals[2] || '',
+                hodName:             s1vals[3] || '',
+                hodInCharge:         s1vals[4] || '',
+                telephone:           s1vals[5] || '',
+                fax:                 s1vals[6] || '',
+                email:               s1vals[7] || '',
+                website:             s1vals[8] || '',
+                programmes:   getTableRows('programmeTable', ['type','name','yearOfStarting','aidedUnaided']),
+                infrastructure: getTableRows('infraTable',   ['classroom','classroomArea','labHall','labArea']),
+                intakeCapacity: getTableRows('intakeTable',  ['programme','ug','pg','mphil','phd']),
+            };
+
+            // ── SECTION 2 ──
+            const section2 = {
+                categoryAdmission: getCloneTableRows('categoryAdmissionTable', ['programme','open','sc','st','ntdt','obc','sbc']),
+                yearAdmission:     getCloneTableRows('yearAdmissionTable',     ['programme','year1','year2','year3','year4']),
+                scholarships:      getCloneTableRows('scholarshipTable',        ['name','studentsReceiving','organization','totalAmount']),
+                faculty:           getCloneTableRows('facultyTable',            ['name','qualification','designation','subject','category','aidedUnaided','teachingExp','researchExp','industryExp']),
+                guestFaculty:      getCloneTableRows('guestFacultyTable',       ['name','qualification','designation','subject']),
+                nonTeaching:       getCloneTableRows('nonTeachingTable',        ['name','qualification','designation','category']),
+            };
+
+            // ── SECTION 3 ──
+            const section3 = {
+                organizedEvents:  getTableRows('sec3_table121', ['title','dateVenue','sponsoringAgency','noOfParticipants','level']),
+                otherEvents:      getTableRows('sec3_table122', ['title','dateVenue','noOfParticipants','level']),
+                otherEventsImages: filesArray.filter(f => f.type.startsWith('image/')).map(f => f.base64),
+                facultyPapers:    getTableRows('sec3_table13',  ['facultyName','title','eventName','dateVenue','level']),
+                facultyWorkshops: getTableRows('sec3_table14',  ['facultyName','title','organizer','dateVenue','level']),
+                facultyDevelopment: getCloneTableRows('facultyDevTable', ['facultyName','programme','organizer','dateVenue','duration']),
+            };
+
+            // ── SECTION 4 ──
+            const section4 = {
+                journalArticles:      getTableRows('table16_1', ['authors','title','journal','dateOfPublication','peerReview','issn','impactFactor']),
+                books:                getTableRows('table16_2', ['authors','title','publisher','year','isbn']),
+                chapters:             getTableRows('table16_3', ['authors','chapterTitle','bookTitle','publisher','year','isbn']),
+                conferenceProceedings:getTableRows('table16_4', ['authors','title','conference','dateVenue','isbn']),
+                otherPublications:    getTableRows('table16_5', ['authors','title','details','year']),
+            };
+
+            // ── SECTION 5 ──
+            const section5 = {
+                facultyResearch:  getTableRows('table17_1', ['facultyName','type','title','fundingAgency','sanctionedAmount','status']),
+                patents:          getTableRows('table17_2', ['facultyName','title','applicationNo','status','year']),
+                consultancy:      getTableRows('table17_3', ['facultyName','organization','title','amount','year']),
+                studentResearch:  getTableRows('table17_4', ['studentName','title','guide','fundingAgency','status']),
+                phdStudents:      getTableRows('table17_5', ['studentName','title','registrationYear','status']),
+                pgDissertation:   getTableRows('table17_6', ['studentName','title','year']),
+                internships:      getTableRows('table17_7', ['studentName','organization','duration','year']),
+            };
+
+            // ── SECTION 6 ──
+            const section6 = {
+                studentAwards: getTableRows('table18_1', ['studentName','awardTitle','organization','date']),
+                facultyAwards: getTableRows('table18_2', ['facultyName','awardTitle','organization','date']),
+                competitiveExams: getCloneTableRows('compExamsTable', ['examName','studentsAppeared','studentsQualified','year']),
+            };
+
+            // ── SECTION 7 ──
+            const section7 = {
+                studyVisits:      getTableRows('table20_1', ['place','faculty','purpose','date','noOfStudents']),
+                domesticVisitors: getTableRows('table20_2', ['name','designation','organization','purpose','date']),
+                intlVisitors:     getTableRows('table20_3', ['name','designation','organization','country','purpose','date']),
+                socialInitiatives:getTableRows('table21',   ['title','organizer','beneficiaries','date']),
+                campusPlacement:  getTableRows('table22',   ['studentName','company','designation','package','year']),
+            };
+
+            // ── SECTION 8 ──
+            const nssImageEls = document.querySelectorAll('#nssPreview img');
+            const nssImages = Array.from(nssImageEls).filter(i => i.src.startsWith('data:')).map(i => i.src);
+            const otherActImageEls = document.querySelectorAll('#otherActPreview img');
+            const otherActImages = Array.from(otherActImageEls).filter(i => i.src.startsWith('data:')).map(i => i.src);
+            const section8 = {
+                workshops:            getTableRows('table23_1', ['title','organizer','dateVenue','noOfParticipants']),
+                nssActivities:        document.querySelector('textarea[placeholder*="NSS"]')?.value.trim() || '',
+                nssImages,
+                teachingQuality:      document.querySelector('textarea[placeholder*="teaching quality"]')?.value.trim() || document.querySelector('textarea[placeholder*="Teaching Quality"]')?.value.trim() || '',
+                otherActivities:      document.querySelector('textarea[placeholder*="other activities"]')?.value.trim() || document.querySelector('textarea[placeholder*="Other Activities"]')?.value.trim() || '',
+                otherActivitiesImages: otherActImages,
+            };
+
+            // ── SECTION 9 ──
+            const corpusEl = document.querySelector('input[placeholder*="corpus"]') || document.querySelector('input[placeholder*="Corpus"]');
+            const section9 = {
+                mous:       getTableRows('table24', ['institution','nationalIntl','collaboration','duration','activities']),
+                donors:     getTableRows('table25', ['name','amount','purpose','year']),
+                totalCorpus: parseFloat(corpusEl?.value || 0) || 0,
+            };
+
+            // ── SECTION 10 ──
+            const sigImg = document.getElementById('sigPreviewImg');
+            const hodSigBase64 = (sigImg && sigImg.src && sigImg.src.startsWith('data:')) ? sigImg.src : '';
+            const section10 = {
+                alumniAssociation:  document.querySelector('select[id*="alumni"]')?.value || '',
+                deptAlumniAssoc:    document.querySelector('select[id*="deptAlumni"]')?.value || '',
+                alumniActivities:   getTableRows('table26', ['title','date','venue','noOfAlumni']),
+                obituaries:         getCloneTableRows('obituaryTable', ['name','designation','year']),
+                otherInfo:          document.getElementById('otherInfoText')?.value.trim() || '',
+                hodName:            document.getElementById('hodName')?.value.trim() || '',
+                hodDate:            document.getElementById('hodDate')?.value.trim() || '',
+                hodSignatureBase64: hodSigBase64,
+            };
+
+            return {
+                academicYear: document.getElementById('academicYear').value.trim() || '2024-25',
+                section1, section2, section3, section4, section5,
+                section6, section7, section8, section9, section10,
+            };
+        }
+
+        /* ══════════════════════════════════════════════════════
+           SAVE TO MONGODB (create or update)
+        ══════════════════════════════════════════════════════ */
+        let currentReportId = null; // set when editing existing report
+
+        async function saveToMongo() {
+            showToast('Saving to MongoDB…');
+            const payload = collectStructuredData();
+            if (!payload.section1.departmentName) {
+                showToast('Please enter Department Name before saving', 'error'); return;
             }
-            list.innerHTML = '';
-            reports.forEach((r, idx) => {
-                const row = document.createElement('div'); row.className = 'report-row';
-                row.innerHTML = `
-            <div class="report-row-left">
-                <div class="report-icon"><i class="fas fa-file-alt"></i></div>
-                <div>
-                    <div class="report-year">Annual Report ${r.year}</div>
-                    <div class="report-meta">Saved on ${r.savedOn} · ${r.dept || 'Department'}</div>
-                </div>
-            </div>
-            <div class="report-row-actions">
-                <button class="btn btn-primary" style="padding:5px 12px;font-size:0.77rem;" onclick="downloadSavedPDF(${idx})"><i class="fas fa-file-pdf"></i> PDF</button>
-                <button class="btn btn-outline" style="padding:5px 12px;font-size:0.77rem;" onclick="downloadSavedJSON(${idx})"><i class="fas fa-database"></i> JSON</button>
-                <button class="btn-danger-soft" onclick="deleteSavedReport(${idx})"><i class="fas fa-trash"></i></button>
-            </div>`;
-                list.appendChild(row);
+            try {
+                let res;
+                if (currentReportId) {
+                    res = await fetch(`${API}/report/${currentReportId}`, {
+                        method: 'PUT', headers: authHeaders(), body: JSON.stringify(payload)
+                    });
+                } else {
+                    res = await fetch(`${API}/save-report`, {
+                        method: 'POST', headers: authHeaders(), body: JSON.stringify(payload)
+                    });
+                }
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || 'Save failed');
+                if (data.id) currentReportId = data.id;
+                showToast('✅ Saved to MongoDB Atlas successfully!');
+            } catch (err) {
+                console.error('Save error:', err);
+                showToast('❌ Save failed: ' + err.message, 'error');
+            }
+        }
+
+        /* ── EXPORT & SAVE (button in modal) ── */
+        async function exportAndSave() {
+            closeSubmitModal();
+            await saveToMongo();
+            setTimeout(() => exportPDF(), 500);
+        }
+
+        /* ══════════════════════════════════════════════════════
+           LOAD REPORT FOR EDITING (from admin panel)
+        ══════════════════════════════════════════════════════ */
+        async function loadReportById(id) {
+            showToast('Loading report data…');
+            try {
+                const res = await fetch(`${API}/report/${id}`, { headers: authHeaders() });
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error);
+                currentReportId = id;
+                populateForm(data.report);
+                showToast('✅ Report loaded for editing');
+            } catch (err) {
+                showToast('❌ Failed to load report: ' + err.message, 'error');
+                console.error(err);
+            }
+        }
+
+        function setInputByPlaceholder(placeholder, value) {
+            const el = document.querySelector(`input[placeholder="${placeholder}"]`);
+            if (el) el.value = value || '';
+        }
+        function setTextareaByPlaceholder(placeholder, value) {
+            const el = document.querySelector(`textarea[placeholder="${placeholder}"]`);
+            if (el) el.value = value || '';
+        }
+
+        function populateTableRows(tableId, rows, keys, addRowFn) {
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            const tbody = table.querySelector('tbody');
+            if (!tbody) return;
+            // Clear all but first row
+            while (tbody.rows.length > 1) tbody.deleteRow(1);
+            if (!rows || !rows.length) return;
+            rows.forEach((row, i) => {
+                if (i > 0) addRowFn();
+                const tr = tbody.rows[i];
+                if (!tr) return;
+                keys.forEach((k, ci) => {
+                    const cell = tr.cells[ci];
+                    if (!cell) return;
+                    const el = cell.querySelector('input,select,textarea');
+                    if (el) el.value = row[k] || '';
+                });
             });
         }
 
-        function deleteSavedReport(idx) {
-            if (!confirm('Delete this saved report?')) return;
-            const reports = getSavedReports(); reports.splice(idx, 1);
-            localStorage.setItem('sndtReports', JSON.stringify(reports));
-            renderSavedReports(); showToast('Report deleted');
+        function populateCloneRows(tbodyId, rows, keys, addRowFn) {
+            const tbody = document.getElementById(tbodyId);
+            if (!tbody) return;
+            while (tbody.rows.length > 1) tbody.deleteRow(1);
+            if (!rows || !rows.length) return;
+            rows.forEach((row, i) => {
+                if (i > 0) addRowFn(tbodyId);
+                const tr = tbody.rows[i];
+                if (!tr) return;
+                keys.forEach((k, ci) => {
+                    const cell = tr.cells[ci];
+                    if (!cell) return;
+                    const el = cell.querySelector('input,select,textarea');
+                    if (el) el.value = row[k] || '';
+                });
+            });
         }
 
-        /* ── COLLECT DATA ── */
-        function collectData() {
-            const year = document.getElementById('academicYear').value;
-            const dept = document.querySelector('input[placeholder="Enter Department Name"]')?.value || 'Department';
-            const data = { university: "SNDT Women's University", report: "Annual Report", year, dept, exported_on: new Date().toISOString(), sections: {} };
-            for (let i = 1; i <= 10; i++) {
-                const sec = document.getElementById('section' + i); if (!sec) continue;
-                data.sections['section' + i] = { fields: [], tables: [] };
-                sec.querySelectorAll('input:not([type="file"]),textarea,select').forEach(el => {
-                    data.sections['section' + i].fields.push({ label: el.placeholder || el.id || 'field', value: el.value });
+        function populateForm(r) {
+            const s1 = r.section1 || {};
+            // Academic year
+            const ayEl = document.getElementById('academicYear');
+            if (ayEl) { ayEl.value = r.academicYear || ''; updateYear(r.academicYear || ''); }
+
+            // Section 1 plain inputs (in DOM order)
+            const s1inputs = document.querySelector('#section1').querySelectorAll('input:not([type="file"]):not(#academicYear), textarea');
+            const s1data = [s1.departmentName, s1.address, s1.yearOfEstablishment, s1.hodName, s1.hodInCharge, s1.telephone, s1.fax, s1.email, s1.website];
+            s1inputs.forEach((el, i) => { if (s1data[i] !== undefined) el.value = s1data[i]; });
+
+            // Tables
+            populateTableRows('programmeTable', s1.programmes,    ['type','name','yearOfStarting','aidedUnaided'], addRowProgramme);
+            populateTableRows('infraTable',     s1.infrastructure, ['classroom','classroomArea','labHall','labArea'], addRowInfra);
+            populateTableRows('intakeTable',    s1.intakeCapacity, ['programme','ug','pg','mphil','phd'], addRowIntake);
+
+            const s2 = r.section2 || {};
+            populateCloneRows('categoryAdmissionTable', s2.categoryAdmission, ['programme','open','sc','st','ntdt','obc','sbc'], addRowClone);
+            populateCloneRows('yearAdmissionTable',     s2.yearAdmission,     ['programme','year1','year2','year3','year4'], addRowClone);
+            populateCloneRows('scholarshipTable',        s2.scholarships,      ['name','studentsReceiving','organization','totalAmount'], addRowClone);
+            populateCloneRows('facultyTable',            s2.faculty,           ['name','qualification','designation','subject','category','aidedUnaided','teachingExp','researchExp','industryExp'], addRowClone);
+            populateCloneRows('guestFacultyTable',       s2.guestFaculty,      ['name','qualification','designation','subject'], addRowClone);
+            populateCloneRows('nonTeachingTable',        s2.nonTeaching,       ['name','qualification','designation','category'], addRowClone);
+
+            const s3 = r.section3 || {};
+            populateTableRows('sec3_table121', s3.organizedEvents,  ['title','dateVenue','sponsoringAgency','noOfParticipants','level'], () => addRowCloneById('sec3_table121'));
+            populateTableRows('sec3_table122', s3.otherEvents,      ['title','dateVenue','noOfParticipants','level'], () => addRowCloneById('sec3_table122'));
+            populateTableRows('sec3_table13',  s3.facultyPapers,    ['facultyName','title','eventName','dateVenue','level'], () => addRowCloneById('sec3_table13'));
+            populateTableRows('sec3_table14',  s3.facultyWorkshops, ['facultyName','title','organizer','dateVenue','level'], () => addRowCloneById('sec3_table14'));
+            populateCloneRows('facultyDevTable', s3.facultyDevelopment, ['facultyName','programme','organizer','dateVenue','duration'], addRowClone);
+            // Restore images
+            if (s3.otherEventsImages && s3.otherEventsImages.length) {
+                s3.otherEventsImages.forEach(src => {
+                    filesArray.push({ name: 'image', type: 'image/jpeg', size: 0, base64: src });
                 });
-                // Section 3 mein uploaded images/files save karo
-                if (i === 3 && filesArray.length > 0) {
-                    filesArray.forEach(f => {
-                        data.sections['section' + i].fields.push({ label: f.name, value: f.base64 });
-                    });
-                }
-                sec.querySelectorAll('table').forEach((tbl, ti) => {
-                    const tData = { index: ti, headers: [], rows: [] };
-                    tbl.querySelectorAll('thead th').forEach(th => tData.headers.push(th.innerText.trim()));
-                    tbl.querySelectorAll('tbody tr').forEach(row => {
-                        const rowData = []; row.querySelectorAll('td').forEach(td => { const el = td.querySelector('input,select,textarea'); rowData.push(el ? el.value : td.innerText.trim()); }); tData.rows.push(rowData);
-                    });
-                    data.sections['section' + i].tables.push(tData);
+                renderFiles();
+            }
+
+            const s4 = r.section4 || {};
+            populateTableRows('table16_1', s4.journalArticles,       ['authors','title','journal','dateOfPublication','peerReview','issn','impactFactor'], () => addRowCloneById('table16_1'));
+            populateTableRows('table16_2', s4.books,                  ['authors','title','publisher','year','isbn'], () => addRowCloneById('table16_2'));
+            populateTableRows('table16_3', s4.chapters,               ['authors','chapterTitle','bookTitle','publisher','year','isbn'], () => addRowCloneById('table16_3'));
+            populateTableRows('table16_4', s4.conferenceProceedings,  ['authors','title','conference','dateVenue','isbn'], () => addRowCloneById('table16_4'));
+            populateTableRows('table16_5', s4.otherPublications,      ['authors','title','details','year'], () => addRowCloneById('table16_5'));
+
+            const s5 = r.section5 || {};
+            populateTableRows('table17_1', s5.facultyResearch,  ['facultyName','type','title','fundingAgency','sanctionedAmount','status'], () => addRowCloneById('table17_1'));
+            populateTableRows('table17_2', s5.patents,          ['facultyName','title','applicationNo','status','year'], () => addRowCloneById('table17_2'));
+            populateTableRows('table17_3', s5.consultancy,      ['facultyName','organization','title','amount','year'], () => addRowCloneById('table17_3'));
+            populateTableRows('table17_4', s5.studentResearch,  ['studentName','title','guide','fundingAgency','status'], () => addRowCloneById('table17_4'));
+            populateTableRows('table17_5', s5.phdStudents,      ['studentName','title','registrationYear','status'], () => addRowCloneById('table17_5'));
+            populateTableRows('table17_6', s5.pgDissertation,   ['studentName','title','year'], () => addRowCloneById('table17_6'));
+            populateTableRows('table17_7', s5.internships,      ['studentName','organization','duration','year'], () => addRowCloneById('table17_7'));
+
+            const s6 = r.section6 || {};
+            populateTableRows('table18_1', s6.studentAwards,    ['studentName','awardTitle','organization','date'], () => addRowCloneById('table18_1'));
+            populateTableRows('table18_2', s6.facultyAwards,    ['facultyName','awardTitle','organization','date'], () => addRowCloneById('table18_2'));
+            populateCloneRows('compExamsTable', s6.competitiveExams, ['examName','studentsAppeared','studentsQualified','year'], addRowClone);
+
+            const s7 = r.section7 || {};
+            populateTableRows('table20_1', s7.studyVisits,      ['place','faculty','purpose','date','noOfStudents'], () => addRowCloneById('table20_1'));
+            populateTableRows('table20_2', s7.domesticVisitors, ['name','designation','organization','purpose','date'], () => addRowCloneById('table20_2'));
+            populateTableRows('table20_3', s7.intlVisitors,     ['name','designation','organization','country','purpose','date'], () => addRowCloneById('table20_3'));
+            populateTableRows('table21',   s7.socialInitiatives,['title','organizer','beneficiaries','date'], () => addRowCloneById('table21'));
+            populateTableRows('table22',   s7.campusPlacement,  ['studentName','company','designation','package','year'], () => addRowCloneById('table22'));
+
+            const s8 = r.section8 || {};
+            populateTableRows('table23_1', s8.workshops, ['title','organizer','dateVenue','noOfParticipants'], () => addRowCloneById('table23_1'));
+            // NSS text
+            const nssEl = document.querySelector('textarea[placeholder*="NSS"]');
+            if (nssEl) nssEl.value = s8.nssActivities || '';
+            const tqEl = document.querySelector('textarea[placeholder*="teaching quality"]') || document.querySelector('textarea[placeholder*="Teaching Quality"]');
+            if (tqEl) tqEl.value = s8.teachingQuality || '';
+            const oaEl = document.querySelector('textarea[placeholder*="other activities"]') || document.querySelector('textarea[placeholder*="Other Activities"]');
+            if (oaEl) oaEl.value = s8.otherActivities || '';
+            // Restore NSS images
+            if (s8.nssImages && s8.nssImages.length) {
+                const preview = document.getElementById('nssPreview');
+                if (preview) s8.nssImages.forEach(src => {
+                    const wrap = document.createElement('div'); wrap.className = 'img-preview-wrap';
+                    wrap.innerHTML = `<img src="${src}" alt=""><button class="chip-del" onclick="this.parentElement.remove()">✕</button>`;
+                    preview.appendChild(wrap);
                 });
             }
-            return data;
+
+            const s9 = r.section9 || {};
+            populateTableRows('table24', s9.mous,   ['institution','nationalIntl','collaboration','duration','activities'], () => addRowCloneById('table24'));
+            populateTableRows('table25', s9.donors, ['name','amount','purpose','year'], () => addRowCloneById('table25'));
+            const corpusEl = document.querySelector('input[placeholder*="corpus"]') || document.querySelector('input[placeholder*="Corpus"]');
+            if (corpusEl) corpusEl.value = s9.totalCorpus || '';
+
+            const s10 = r.section10 || {};
+            populateTableRows('table26', s10.alumniActivities, ['title','date','venue','noOfAlumni'], () => addRowCloneById('table26'));
+            populateCloneRows('obituaryTable', s10.obituaries, ['name','designation','year'], addRowClone);
+            const otherInfoEl = document.getElementById('otherInfoText');
+            if (otherInfoEl) otherInfoEl.value = s10.otherInfo || '';
+            const hodNameEl = document.getElementById('hodName');
+            if (hodNameEl) hodNameEl.value = s10.hodName || '';
+            const hodDateEl = document.getElementById('hodDate');
+            if (hodDateEl) hodDateEl.value = s10.hodDate || '';
+            if (s10.hodSignatureBase64) {
+                const sigImg = document.getElementById('sigPreviewImg');
+                const sigPlaceholder = document.getElementById('sigPlaceholder');
+                if (sigImg) { sigImg.src = s10.hodSignatureBase64; sigImg.style.display = 'block'; }
+                if (sigPlaceholder) sigPlaceholder.style.display = 'none';
+            }
         }
 
         /* ── BUILD PDF CONTENT ── */
         function buildPDFContent() {
             const year = document.getElementById('academicYear').value.replace('-', '–');
-            const dept = document.querySelector('input[placeholder="Enter Department Name"]')?.value || '';
+            const s1inputs = document.querySelector('#section1').querySelectorAll('input:not([type="file"]):not(#academicYear), textarea');
+            const dept = s1inputs[0]?.value || '';
             const hod = document.getElementById('hodName')?.value || '';
 
             const wrap = document.createElement('div');
             wrap.style.cssText = 'font-family:Arial,sans-serif;font-size:12px;color:#111;padding:10px;';
-
-            // Cover header
             wrap.innerHTML = `
     <div style="text-align:center;border-bottom:3px solid #1a1f2e;padding-bottom:18px;margin-bottom:24px;">
         <div style="font-size:11px;color:#6b7399;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">SNDT Women's University</div>
@@ -3237,39 +3565,26 @@
         ${hod ? `<div style="font-size:12px;color:#6b7399;">HOD / Principal: ${hod}</div>` : ''}
     </div>`;
 
-            const sectionNames = ['Basic Department Details', 'Admission & Staff Details', 'Events & Participation', 'Publications & Research', 'Research Projects', 'Awards & Exams', 'Study Visits & Visitors', 'Department Activities', 'MOUs & Donors', 'Alumni Association'];
-
+            const sectionNames = ['Basic Department Details','Admission & Staff Details','Events & Participation','Publications & Research','Research Projects','Awards & Exams','Study Visits & Visitors','Department Activities','MOUs & Donors','Alumni Association'];
             for (let i = 1; i <= 10; i++) {
                 const sec = document.getElementById('section' + i); if (!sec) continue;
                 const clone = sec.cloneNode(true);
-                // Remove UI-only elements
                 clone.querySelectorAll('.section-navigation,button,.add-row-btn,.upload-zone,.year-banner').forEach(el => el.remove());
-                clone.querySelectorAll('img[id="sigPreviewImg"]').forEach(img => { if (img.src && img.src !== window.location.href) img.style.display = 'block'; });
-
-                // Style the section heading
                 const secDiv = document.createElement('div');
                 secDiv.style.cssText = 'page-break-inside:avoid;margin-bottom:24px;';
-
                 const secHead = document.createElement('div');
-                secHead.style.cssText = 'background:#1a1f2e;color:#fff;padding:10px 14px;border-radius:6px 6px 0 0;font-size:13px;font-weight:700;margin-bottom:0;';
-                secHead.innerHTML = `<span style="color:#a0b4ff;margin-right:8px;">0${i}</span> ${sectionNames[i - 1]}`;
-
-                // Style all tables inside clone
+                secHead.style.cssText = 'background:#1a1f2e;color:#fff;padding:10px 14px;border-radius:6px 6px 0 0;font-size:13px;font-weight:700;';
+                secHead.innerHTML = `<span style="color:#a0b4ff;margin-right:8px;">0${i}</span> ${sectionNames[i-1]}`;
                 clone.querySelectorAll('table').forEach(tbl => {
                     tbl.style.cssText = 'width:100%;border-collapse:collapse;margin-bottom:12px;font-size:11px;';
                     tbl.querySelectorAll('th').forEach(th => { th.style.cssText = 'background:#1a1f2e;color:#fff;padding:6px 8px;text-align:left;font-size:10px;border:1px solid #ddd;'; });
                     tbl.querySelectorAll('td').forEach(td => { td.style.cssText = 'padding:5px 8px;border:1px solid #ddd;vertical-align:middle;font-size:11px;'; });
-                    tbl.querySelectorAll('tr:nth-child(even) td').forEach(td => { td.style.background = '#f8f9ff'; });
-                    // Replace inputs with their values
                     tbl.querySelectorAll('input').forEach(inp => { const span = document.createElement('span'); span.textContent = inp.value || '—'; inp.parentNode.replaceChild(span, inp); });
                     tbl.querySelectorAll('select').forEach(sel => { const span = document.createElement('span'); span.textContent = sel.options[sel.selectedIndex]?.text || '—'; sel.parentNode.replaceChild(span, sel); });
                 });
-                // Replace textareas too
                 clone.querySelectorAll('textarea').forEach(ta => { const p = document.createElement('p'); p.style.cssText = 'font-size:11px;line-height:1.5;margin:4px 0;'; p.textContent = ta.value || '—'; ta.parentNode.replaceChild(p, ta); });
-
-                clone.style.cssText = 'display:block;padding:12px;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;margin-bottom:4px;';
-                secDiv.appendChild(secHead);
-                secDiv.appendChild(clone);
+                clone.style.cssText = 'display:block;padding:12px;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;';
+                secDiv.appendChild(secHead); secDiv.appendChild(clone);
                 wrap.appendChild(secDiv);
             }
             return wrap;
@@ -3280,125 +3595,174 @@
             closeSubmitModal();
             showToast('Generating PDF…');
             const year = document.getElementById('academicYear').value;
-            const content = buildPDFContent();
             html2pdf().set({
                 margin: [10, 8, 10, 8],
                 filename: `SNDT_Annual_Report_${year}.pdf`,
                 html2canvas: { scale: 2, useCORS: true, logging: false },
                 jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' }
-            }).from(content).save().then(() => showToast('PDF downloaded successfully'));
+            }).from(buildPDFContent()).save().then(() => showToast('PDF downloaded successfully'));
         }
 
-        /* ── EXPORT & SAVE (MongoDB) ── */
-        async function exportAndSave() {
-            closeSubmitModal();
-            const data = collectData();
+        /* ══════════════════════════════════════════════════════
+           SECTION 1 TABLE HELPERS
+        ══════════════════════════════════════════════════════ */
+        function addRowProgramme() {
+            const tbody = document.querySelector('#programmeTable tbody');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td><select><option>Degree</option><option>Diploma</option><option>Certificate Programme</option><option>Online Programme</option></select></td><td><input type="text" placeholder="Enter Programme Name"></td><td><input type="number" placeholder="Enter Year"></td><td><select><option>Aided</option><option>Unaided</option></select></td><td><button type="button" class="btn-danger-soft delete-row">Delete</button></td>`;
+            tbody.appendChild(tr);
+        }
+        function addRowInfra() {
+            const tbody = document.querySelector('#infraTable tbody');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td><input type="text" placeholder="Example: Classroom 1"></td><td><input type="number" placeholder="Area"></td><td><input type="text" placeholder="Example: Lab 1"></td><td><input type="number" placeholder="Area"></td><td><button type="button" class="btn-danger-soft delete-row">Delete</button></td>`;
+            tbody.appendChild(tr);
+        }
+        function addRowIntake() {
+            const tbody = document.querySelector('#intakeTable tbody');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td><input type="text" placeholder="Enter Programme Name"></td><td><input type="number" value="0"></td><td><input type="number" value="0"></td><td><input type="number" value="0"></td><td><input type="number" value="0"></td><td><button type="button" class="btn-danger-soft delete-row">Delete</button></td>`;
+            tbody.appendChild(tr);
+        }
 
-            try {
-                await fetch("http://localhost:5000/save-report", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(data)
-                });
-                showToast("Saved to MongoDB ✅");
-            } catch (error) {
-                console.error(error);
-                showToast("Error saving ❌");
+        /* ── ADD ROW (tbody-id) ── */
+        function addRowClone(tbodyId) {
+            const tbody = document.getElementById(tbodyId); if (!tbody) return;
+            const newRow = tbody.rows[0].cloneNode(true);
+            newRow.querySelectorAll('input').forEach(inp => { if (!inp.hasAttribute('readonly')) inp.value = inp.type === 'number' ? 0 : ''; });
+            newRow.querySelectorAll('select').forEach(sel => sel.selectedIndex = 0);
+            const sr = newRow.cells[0]; if (sr && !sr.querySelector('input,select')) sr.textContent = tbody.rows.length + 1;
+            tbody.appendChild(newRow);
+        }
+
+        /* ── ADD ROW (table-id) ── */
+        function addRowCloneById(tableId) {
+            const table = document.getElementById(tableId); if (!table) return;
+            const tbody = table.querySelector('tbody');
+            const newRow = tbody.rows[0].cloneNode(true);
+            newRow.querySelectorAll('input').forEach(inp => { if (!inp.hasAttribute('readonly')) inp.value = inp.type === 'number' ? 0 : ''; });
+            newRow.querySelectorAll('select').forEach(sel => sel.selectedIndex = 0);
+            const sr = newRow.cells[0]; if (sr && !sr.querySelector('input,select')) sr.textContent = tbody.rows.length + 1;
+            tbody.appendChild(newRow);
+        }
+
+        /* ── DELETE ROW ── */
+        document.addEventListener('click', function (e) {
+            if (e.target.classList.contains('delete-row')) {
+                const row = e.target.closest('tr'); const tbody = row.closest('tbody');
+                if (tbody && tbody.rows.length > 1) { row.remove(); Array.from(tbody.rows).forEach((r, i) => { const c = r.cells[0]; if (c && !c.querySelector('input,select')) c.textContent = i + 1; }); }
+                else alert('At least one row must remain!');
             }
+        });
 
-            // Also download PDF after saving
-            setTimeout(() => {
-                const year = document.getElementById('academicYear').value;
-                const content = buildPDFContent();
-                html2pdf().set({
-                    margin: [10, 8, 10, 8],
-                    filename: `SNDT_Annual_Report_${year}.pdf`,
-                    html2canvas: { scale: 2, useCORS: true, logging: false },
-                    jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' }
-                }).from(content).save().then(() => showToast('Saved & PDF downloaded!'));
-            }, 300);
-        }
-
-        /* ── DOWNLOAD SAVED PDF ── */
-        function downloadSavedPDF(idx) {
-            showToast('Generating PDF…');
-            const reports = getSavedReports();
-            const r = reports[idx];
-            // Build a print-ready HTML from saved JSON data
-            const wrap = document.createElement('div');
-            wrap.style.cssText = 'font-family:Arial,sans-serif;font-size:12px;color:#111;padding:10px;';
-            wrap.innerHTML = `
-    <div style="text-align:center;border-bottom:3px solid #1a1f2e;padding-bottom:18px;margin-bottom:24px;">
-        <div style="font-size:11px;color:#6b7399;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">SNDT Women's University</div>
-        <div style="font-size:22px;font-weight:700;color:#1a1f2e;margin-bottom:4px;">Annual Report</div>
-        <div style="font-size:15px;color:#4f6ef7;font-weight:600;margin-bottom:4px;">Academic Year ${r.year.replace('-', '–')}</div>
-        <div style="font-size:12px;color:#6b7399;">${r.dept || ''}</div>
-    </div>`;
-
-            const sectionNames = ['Basic Department Details', 'Admission & Staff Details', 'Events & Participation', 'Publications & Research', 'Research Projects', 'Awards & Exams', 'Study Visits & Visitors', 'Department Activities', 'MOUs & Donors', 'Alumni Association'];
-
-            Object.keys(r.data.sections || {}).forEach((key, si) => {
-                const sec = r.data.sections[key];
-                const secDiv = document.createElement('div');
-                secDiv.style.cssText = 'page-break-inside:avoid;margin-bottom:24px;';
-                const hdr = document.createElement('div');
-                hdr.style.cssText = 'background:#1a1f2e;color:#fff;padding:9px 13px;border-radius:6px 6px 0 0;font-size:13px;font-weight:700;';
-                hdr.innerHTML = `<span style="color:#a0b4ff;margin-right:8px;">0${si + 1}</span>${sectionNames[si] || key}`;
-                const body = document.createElement('div');
-                body.style.cssText = 'padding:12px;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;';
-
-                sec.tables.forEach(tbl => {
-                    if (!tbl.headers.length) return;
-                    const t = document.createElement('table');
-                    t.style.cssText = 'width:100%;border-collapse:collapse;margin-bottom:12px;font-size:11px;';
-                    const thead = document.createElement('thead');
-                    const hr = document.createElement('tr');
-                    tbl.headers.forEach(h => { const th = document.createElement('th'); th.textContent = h; th.style.cssText = 'background:#1a1f2e;color:#fff;padding:6px 8px;text-align:left;font-size:10px;border:1px solid #ddd;'; hr.appendChild(th); });
-                    thead.appendChild(hr); t.appendChild(thead);
-                    const tbody = document.createElement('tbody');
-                    tbl.rows.forEach((row, ri) => {
-                        const tr = document.createElement('tr');
-                        row.forEach(cell => { const td = document.createElement('td'); td.textContent = cell || '—'; td.style.cssText = `padding:5px 8px;border:1px solid #ddd;vertical-align:middle;font-size:11px;`; tr.appendChild(td); });
-                        tbody.appendChild(tr);
-                    });
-                    t.appendChild(tbody); body.appendChild(t);
+        /* ── FILE UPLOADS (Section 3 events images) ── */
+        const fileInput = document.getElementById('fileInput');
+        const previewContainer = document.getElementById('previewContainer');
+        let filesArray = [];
+        if (fileInput) {
+            fileInput.addEventListener('change', function (e) {
+                Array.from(e.target.files).forEach(file => {
+                    if (file.size > 1024 * 1024) { alert(file.name + ' exceeds 1MB limit'); return; }
+                    const reader = new FileReader();
+                    reader.onload = function(ev) {
+                        filesArray.push({ name: file.name, size: file.size, type: file.type, base64: ev.target.result });
+                        renderFiles();
+                    };
+                    reader.readAsDataURL(file);
                 });
-
-                secDiv.appendChild(hdr); secDiv.appendChild(body); wrap.appendChild(secDiv);
+                fileInput.value = '';
             });
+        }
+        function renderFiles() {
+            if (!previewContainer) return;
+            previewContainer.innerHTML = '';
+            filesArray.forEach((file, index) => {
+                const chip = document.createElement('div'); chip.className = 'file-chip';
+                const isImg = file.type.startsWith('image/');
+                const isPdf = file.type === 'application/pdf';
+                const icon = isImg ? 'fa-file-image' : isPdf ? 'fa-file-pdf' : 'fa-file-word';
+                const iconColor = isImg ? 'var(--accent)' : isPdf ? '#e85a5a' : '#4f6ef7';
+                chip.innerHTML = `<i class="fas ${icon}" style="color:${iconColor}"></i>${file.name} (${(file.size/1024).toFixed(1)}KB)<button class="chip-del" onclick="removeFile(${index})">✕</button>`;
+                if (isImg) {
+                    const img = document.createElement('img');
+                    img.src = file.base64;
+                    img.style.cssText = 'display:block;max-width:200px;max-height:120px;margin-top:6px;border-radius:6px;object-fit:contain;';
+                    chip.appendChild(img);
+                }
+                previewContainer.appendChild(chip);
+            });
+        }
+        function removeFile(index) { filesArray.splice(index, 1); renderFiles(); }
 
-            html2pdf().set({
-                margin: [10, 8, 10, 8],
-                filename: `SNDT_Annual_Report_${r.year}.pdf`,
-                html2canvas: { scale: 2, useCORS: true, logging: false },
-                jsPDF: { orientation: 'portrait', unit: 'mm', format: 'a4' }
-            }).from(wrap).save().then(() => showToast('PDF downloaded'));
+        /* ── IMAGE PREVIEW HELPER (NSS / Other activities) ── */
+        function previewFiles(event, previewId) {
+            const preview = document.getElementById(previewId);
+            if (!preview) return;
+            Array.from(event.target.files).forEach(file => {
+                if (file.size > 1024 * 1024) { alert(file.name + ' exceeds 1MB'); return; }
+                if (file.type.startsWith('image/')) {
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        const wrap = document.createElement('div'); wrap.className = 'img-preview-wrap';
+                        wrap.innerHTML = `<img src="${e.target.result}" alt=""><button class="chip-del" onclick="this.parentElement.remove()">✕</button>`;
+                        preview.appendChild(wrap);
+                    }; reader.readAsDataURL(file);
+                } else {
+                    const chip = document.createElement('div'); chip.className = 'file-chip';
+                    chip.innerHTML = `<i class="fas fa-file-alt" style="color:var(--accent)"></i>${file.name}<button class="chip-del" onclick="this.parentElement.remove()">✕</button>`;
+                    preview.appendChild(chip);
+                }
+            });
         }
 
-        function downloadSavedJSON(idx) {
-            const reports = getSavedReports();
-            const r = reports[idx];
-            const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = `SNDT_Annual_Report_${r.year}.json`; a.click(); URL.revokeObjectURL(url);
-            showToast('JSON downloaded');
+        /* ── ALUMNI ── */
+        function toggleAlumni(val) { const el = document.getElementById('alumniFileUpload'); if (el) el.style.display = val === 'Yes' ? 'block' : 'none'; }
+        function renderAlumniFiles() {
+            const input = document.getElementById('alumniFiles'); const list = document.getElementById('alumniFileList'); if (!input||!list) return; list.innerHTML = '';
+            Array.from(input.files).forEach((file, idx) => { const chip = document.createElement('div'); chip.className = 'file-chip'; chip.innerHTML = `<i class="fas fa-file" style="color:var(--accent)"></i>${file.name}<button class="chip-del" onclick="deleteAlumniFile(${idx})">✕</button>`; list.appendChild(chip); });
+        }
+        function deleteAlumniFile(index) { const input = document.getElementById('alumniFiles'); const dt = new DataTransfer(); Array.from(input.files).forEach((f, i) => { if (i !== index) dt.items.add(f); }); input.files = dt.files; renderAlumniFiles(); }
+        function renderOtherFiles() {
+            const input = document.getElementById('otherInfoFiles'); const list = document.getElementById('otherInfoFileList'); if (!input||!list) return; list.innerHTML = '';
+            Array.from(input.files).forEach((file, idx) => { const chip = document.createElement('div'); chip.className = 'file-chip'; chip.innerHTML = `<i class="fas fa-file" style="color:var(--accent)"></i>${file.name}<button class="chip-del" onclick="deleteOtherFile(${idx})">✕</button>`; list.appendChild(chip); });
+        }
+        function deleteOtherFile(index) { const input = document.getElementById('otherInfoFiles'); const dt = new DataTransfer(); Array.from(input.files).forEach((f, i) => { if (i !== index) dt.items.add(f); }); input.files = dt.files; renderOtherFiles(); }
+
+        /* ── SIGNATURE ── */
+        function previewSig(event) {
+            const file = event.target.files[0]; if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = document.getElementById('sigPreviewImg');
+                const ph  = document.getElementById('sigPlaceholder');
+                if (img) { img.src = e.target.result; img.style.display = 'block'; }
+                if (ph) ph.style.display = 'none';
+            };
+            reader.readAsDataURL(file);
         }
 
-        /* ── EXPORT JSON ── */
-        function exportJSON() {
-            closeSubmitModal();
-            const data = collectData();
-            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = `SNDT_Annual_Report_${data.year}.json`; a.click(); URL.revokeObjectURL(url);
-            showToast('JSON saved successfully');
+        /* ══════════════════════════════════════════════════════
+           INIT
+        ══════════════════════════════════════════════════════ */
+        // Show user info
+        const badge = document.getElementById('userBadge');
+        if (badge) badge.textContent = username ? `👤 ${username}${deptName ? ' · ' + deptName : ''}` : '';
+
+        // Pre-fill dept name for department users
+        if (deptName && role === 'department') {
+            const deptInput = document.querySelector('input[placeholder="Enter Department Name"]');
+            if (deptInput) deptInput.value = deptName;
         }
 
-        /* ── INIT ── */
+        // Initialize table rows
         addRowProgramme(); addRowInfra(); addRowIntake();
 
-
-
+        // Check if opened for editing from admin panel
+        const editId = sessionStorage.getItem('sndt_edit_id');
+        if (editId) {
+            sessionStorage.removeItem('sndt_edit_id');
+            loadReportById(editId);
+        }
    </script>
 </body>
 
